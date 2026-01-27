@@ -1,0 +1,15 @@
+*.pt
+*.pth
+*.pkl
+*.ckpt
+*.ptl
+*.ptz
+*.ptx
+*.ptt
+*.ptm
+*.ptn
+*.ptq
+*.ptw
+*.ptv
+
+models/
