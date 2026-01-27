@@ -1,10 +1,11 @@
 # Paired Video to VACE Data Processing Pipeline
 
-This pipeline processes paired videos through 6 sequential stages to produce VACE training data.
+This pipeline processes paired videos through 7 sequential stages to produce VACE training data.
 
 ## Overview
 
 The pipeline takes paired videos (2 videos per folder) and processes them through:
+0. **Video trimming** (Stage 0): Trims videos longer than max_length (default: 15s) by removing the end portion
 1. **Mirrored video correction** (Stage 1): Flips horizontally any videos with "mirrored" in filename
 2. **FPS normalization** (Stage 2): Converts all videos to target FPS (default: 16 fps) for consistency
 3. **Clip extraction** (Stage 3): Cuts videos into clips using sliding window (num_frames, num_stride)
@@ -102,7 +103,85 @@ For each clip pair (clip1_a, clip1_b), two training samples are created:
 - NumPy for array operations
 - InsightFace for face detection (same as WAN-Animate) - preferred method
 - MediaPipe or OpenCV DNN for face detection - fallback methods
+- Ultralytics (YOLO) for multi-person detection
+- SAM (Segment Anything Model) for person segmentation (optional, for multi-person videos)
 - ffmpeg for video manipulation
+
+## Model Downloads
+
+### InsightFace Face Detection Model (antelopev2)
+
+The pipeline uses InsightFace with the `antelopev2` model for face detection. The model will be auto-downloaded on first use, or you can download it manually:
+
+**Automatic Download:**
+- The pipeline will automatically download the model on first use if `insightface` package is installed
+- Models are saved to `~/.insightface/models/antelopev2/` by default
+
+**Manual Download:**
+1. Install InsightFace: `pip install insightface`
+2. Download the antelopev2 model:
+   ```python
+   from insightface.app import FaceAnalysis
+   app = FaceAnalysis(name='antelopev2')
+   app.prepare(ctx_id=0, det_size=(640, 640))
+   ```
+   This will download the model to `~/.insightface/models/antelopev2/`
+
+**Alternative Locations:**
+The pipeline also checks these locations:
+- `models/ByteDance/InfiniteYou/supports/insightface/models/antelopev2/`
+- `models/InfiniteYou/insightface/models/antelopev2/`
+- `~/.insightface/models/antelopev2/`
+
+**Required Model Files:**
+- `scrfd_10g_bnkps.onnx` (detection model)
+- `1k3d68.onnx`
+- `2d106det.onnx`
+- `genderage.onnx`
+- `glintr100.onnx`
+
+### YOLO Model (yolov8n.pt)
+
+The pipeline uses YOLOv8 for multi-person detection. The model will be auto-downloaded on first use.
+
+**Automatic Download:**
+- Ultralytics will automatically download `yolov8n.pt` on first use
+- Model is saved to the current directory or ultralytics cache
+
+**Manual Download:**
+1. Place `yolov8n.pt` in the project root directory, or
+2. Download from: https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+3. Place it in your project root or current working directory
+
+**Alternative Models:**
+You can use other YOLOv8 models by specifying the model name:
+- `yolov8n.pt` (nano, smallest, fastest) - default
+- `yolov8s.pt` (small)
+- `yolov8m.pt` (medium)
+- `yolov8l.pt` (large)
+- `yolov8x.pt` (extra large, most accurate)
+
+### SAM Model (Segment Anything Model) - Optional
+
+SAM is only needed for multi-person video segmentation. If not available, the pipeline will skip segmentation for multi-person videos.
+
+**Download:**
+1. Download SAM checkpoint from: https://github.com/facebookresearch/segment-anything#model-checkpoints
+2. Choose a model size:
+   - `sam_vit_h_4b8939.pth` (ViT-H, largest, most accurate) - ~2.4GB
+   - `sam_vit_l_0b3195.pth` (ViT-L) - ~1.2GB
+   - `sam_vit_b_01ec64.pth` (ViT-B, smallest) - ~375MB
+3. Place in one of these locations:
+   - `checkpoints/sam_{model_type}.pth`
+   - `~/.cache/sam/sam_{model_type}.pth`
+   - `/tmp/sam_{model_type}.pth`
+
+**Installation:**
+```bash
+pip install segment-anything
+```
+
+The pipeline will attempt to auto-download if the checkpoint is not found, but manual download is recommended for large models.
 
 ## Pipeline Stages
 
