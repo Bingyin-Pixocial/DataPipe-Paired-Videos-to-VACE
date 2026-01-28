@@ -22,6 +22,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
+# Basic usage (without VLM)
 python main.py \
     --root_folder /path/to/paired/videos \
     --output_folder /path/to/output \
@@ -30,6 +31,18 @@ python main.py \
     --motion_similarity_threshold 0.8 \
     --dtw_similarity_threshold 0.9 \
     --max_video_length 15.0
+
+# With VLM prompt generation
+python main.py \
+    --root_folder /path/to/paired/videos \
+    --output_folder /path/to/output \
+    --num_frames 81 \
+    --num_stride 30 \
+    --motion_similarity_threshold 0.8 \
+    --dtw_similarity_threshold 0.9 \
+    --max_video_length 15.0 \
+    --use_vlm \
+    --vlm_model Qwen/Qwen3-VL-30B-A3B-Instruct
 ```
 
 ### Arguments
@@ -105,6 +118,7 @@ For each clip pair (clip1_a, clip1_b), two training samples are created:
 - MediaPipe or OpenCV DNN for face detection - fallback methods
 - Ultralytics (YOLO) for multi-person detection
 - SAM (Segment Anything Model) for person segmentation (optional, for multi-person videos)
+- Transformers and Qwen3-VL for VLM-based prompt generation (optional, requires `--use_vlm` flag)
 - ffmpeg for video manipulation
 
 ## Model Downloads
@@ -183,6 +197,33 @@ pip install segment-anything
 
 The pipeline will attempt to auto-download if the checkpoint is not found, but manual download is recommended for large models.
 
+### Qwen3-VL Model (for Prompt Generation) - Optional
+
+Qwen3-VL is used for generating descriptive prompts by analyzing reference images and control videos. This is optional and only used when `--use_vlm` flag is set.
+
+**Installation:**
+```bash
+pip install transformers
+# Install from source for latest features:
+pip install git+https://github.com/huggingface/transformers
+```
+
+**Automatic Download:**
+- The model will be automatically downloaded from HuggingFace on first use
+- Model is saved to HuggingFace cache directory (`~/.cache/huggingface/`)
+
+**Model Options:**
+- `Qwen/Qwen3-VL-30B-A3B-Instruct` (default) - 30B parameters, MoE architecture
+- `Qwen/Qwen3-VL-235B-A22B-Thinking` - Larger model with reasoning capabilities
+- Other Qwen3-VL variants available on HuggingFace
+
+**Usage:**
+- Enable VLM prompt generation: `--use_vlm`
+- Specify model: `--vlm_model Qwen/Qwen3-VL-30B-A3B-Instruct`
+- If VLM is not available or fails, the pipeline falls back to default prompts
+
+**Note:** VLM models are large (30B+ parameters) and require significant GPU memory. Ensure you have sufficient GPU memory or use CPU (slower).
+
 ## Pipeline Stages
 
 ### Stage 0: Video Trimming
@@ -249,6 +290,16 @@ The pipeline will attempt to auto-download if the checkpoint is not found, but m
 - Creates `metadata_vace.csv` in root output folder
 - Generates two training samples per clip pair (bidirectional)
 - Formats reference images as JSON array string
+- **VLM-based prompt generation** (if `--use_vlm` is enabled):
+  - Uses Qwen3-VL to analyze the first frame reference image (`vace_reference_image_first`)
+    - Describes camera angle (front view, side view, overhead, etc.)
+    - Describes background setting
+    - Describes character appearance (clothing, pose, position)
+  - Uses Qwen3-VL to analyze the control video (`vace_control_video`)
+    - Describes concrete movements, poses, and motion patterns
+    - Focuses on what the character is doing and how they move
+  - Combines both descriptions into a concise, descriptive prompt
+- **Fallback prompts**: If VLM is not available or disabled, uses default prompt: "The character is mimicking the dancing movements."
 - All paths are relative to output folder root
 
 ## Notes
@@ -272,4 +323,9 @@ The pipeline will attempt to auto-download if the checkpoint is not found, but m
 - Unqualified clips are moved to `unqualified/` subdirectory (not deleted)
 - Face detection uses InsightFace (same as WAN-Animate) with clarity evaluation for best quality
 - Face detection handles multi-person videos by selecting largest/clearest face
+- **Prompt generation**: Uses VLM (Qwen3-VL) to generate descriptive prompts by analyzing reference images and control videos
+  - VLM analyzes camera angle, background, and character appearance from first frame
+  - VLM analyzes movements, poses, and motion patterns from control video
+  - Prompts are generated per training sample (each clip pair generates 2 prompts)
+  - Falls back to default prompt if VLM is unavailable or disabled
 - All video paths are resolved to absolute paths to avoid path issues
