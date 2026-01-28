@@ -291,11 +291,40 @@ def run_pipeline(config: PipelineConfig, skip_stages: list = None):
     # Stage 6: Metadata construction
     if 6 not in skip_stages:
         logger.info("\n[Stage 6] Building metadata...")
+        
+        # Initialize VLM prompt generator if requested
+        vlm_generator = None
+        if args.use_vlm:
+            try:
+                from pipeline.vlm_prompt_generator import VLMPromptGenerator
+                logger.info(f"Initializing VLM for prompt generation: {args.vlm_model}")
+                vlm_generator = VLMPromptGenerator(
+                    model_name=args.vlm_model,
+                    use_flash_attention=False  # Set to True if flash-attn is installed
+                )
+                logger.info("VLM initialized successfully. Using VLM-generated prompts.")
+            except Exception as e:
+                logger.error(f"Failed to initialize VLM: {e}")
+                logger.error("Will use fallback prompts. Install transformers and Qwen3-VL for VLM prompts.")
+                logger.error(f"Install with: pip install transformers")
+                vlm_generator = None
+        else:
+            logger.info("VLM prompt generation disabled. Using fallback prompts.")
+        
         metadata_path = build_metadata(
             reference_results,
             output_path,  # Root output folder
-            output_path / "clips"  # Clips folder
+            output_path / "clips",  # Clips folder
+            vlm_generator=vlm_generator
         )
+        
+        # Cleanup VLM if used
+        if vlm_generator:
+            try:
+                vlm_generator.cleanup()
+            except Exception as e:
+                logger.debug(f"Error during VLM cleanup: {e}")
+        
         logger.info(f"Global metadata saved to: {metadata_path}")
         logger.info(f"Metadata contains {len(reference_results) * 2} training samples")
     else:
