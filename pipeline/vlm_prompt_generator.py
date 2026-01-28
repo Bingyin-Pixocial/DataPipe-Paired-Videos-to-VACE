@@ -126,7 +126,9 @@ class VLMPromptGenerator:
         )
         
         # Move inputs to appropriate device
-        # For models with device_map="auto", inputs should be moved to the first device
+        # For models with device_map="auto", transformers handles device placement automatically
+        # But we ensure inputs are on the correct device for safety
+        device = None
         if hasattr(self._model, 'hf_device_map') and self._model.hf_device_map:
             # Multi-device model - use first device
             first_device = list(self._model.hf_device_map.values())[0]
@@ -134,24 +136,37 @@ class VLMPromptGenerator:
                 first_device = first_device[0] if first_device else None
             device = first_device if first_device else None
         else:
-            # Single device model
-            device = next(self._model.parameters()).device if hasattr(self._model, 'parameters') else None
+            # Single device model - get device from first parameter
+            try:
+                device = next(self._model.parameters()).device
+            except StopIteration:
+                # Model has no parameters (shouldn't happen)
+                device = None
         
+        # Move tensor inputs to device if device is available
         if device:
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
                      for k, v in inputs.items()}
         
         # Generate description
-        with torch.no_grad():
-            generated_ids = self._model.generate(**inputs, max_new_tokens=256)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = self._processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
+        try:
+            with torch.no_grad():
+                generated_ids = self._model.generate(**inputs, max_new_tokens=256)
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                ]
+                output_text = self._processor.batch_decode(
+                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )
+            
+            description = output_text[0] if output_text else ""
+            if not description:
+                logger.warning(f"VLM returned empty description for image: {image_path.name}")
+                description = "A character in a video frame."
+        except Exception as e:
+            logger.error(f"Error generating image description: {e}")
+            raise
         
-        description = output_text[0] if output_text else ""
         logger.debug(f"Image description: {description[:100]}...")
         return description
     
@@ -180,8 +195,19 @@ class VLMPromptGenerator:
         
         # Qwen3-VL uses video_url format (as shown in reference implementation)
         # For local files, use file:// URL format
+        # file:///absolute/path (three slashes) for absolute paths on Linux/Unix
+        # file:///C:/path (Windows absolute path)
         video_path_str = str(video_path.resolve())
-        video_url = f"file://{video_path_str}"
+        # Ensure proper file:// URL format: file:/// for absolute paths
+        if video_path_str.startswith('/'):
+            # Linux/Unix absolute path: file:///absolute/path
+            video_url = f"file://{video_path_str}"
+        elif ':' in video_path_str and video_path_str[1] == ':':
+            # Windows absolute path: file:///C:/path
+            video_url = f"file:///{video_path_str}"
+        else:
+            # Relative path (shouldn't happen after resolve(), but handle it)
+            video_url = f"file:///{video_path_str}"
         
         messages = [
             {
@@ -206,7 +232,9 @@ class VLMPromptGenerator:
         )
         
         # Move inputs to appropriate device
-        # For models with device_map="auto", inputs should be moved to the first device
+        # For models with device_map="auto", transformers handles device placement automatically
+        # But we ensure inputs are on the correct device for safety
+        device = None
         if hasattr(self._model, 'hf_device_map') and self._model.hf_device_map:
             # Multi-device model - use first device
             first_device = list(self._model.hf_device_map.values())[0]
@@ -214,24 +242,36 @@ class VLMPromptGenerator:
                 first_device = first_device[0] if first_device else None
             device = first_device if first_device else None
         else:
-            # Single device model
-            device = next(self._model.parameters()).device if hasattr(self._model, 'parameters') else None
+            # Single device model - get device from first parameter
+            try:
+                device = next(self._model.parameters()).device
+            except StopIteration:
+                # Model has no parameters (shouldn't happen)
+                device = None
         
+        # Move tensor inputs to device if device is available
         if device:
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
                      for k, v in inputs.items()}
         
         # Generate description
-        with torch.no_grad():
-            generated_ids = self._model.generate(**inputs, max_new_tokens=256)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = self._processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
-        
-        description = output_text[0] if output_text else ""
+        try:
+            with torch.no_grad():
+                generated_ids = self._model.generate(**inputs, max_new_tokens=256)
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                ]
+                output_text = self._processor.batch_decode(
+                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )
+            
+            description = output_text[0] if output_text else ""
+            if not description:
+                logger.warning(f"VLM returned empty description for video: {video_path.name}")
+                description = "A character performing movements."
+        except Exception as e:
+            logger.error(f"Error generating video description: {e}")
+            raise
         
         logger.debug(f"Video description: {description[:100]}...")
         return description
@@ -253,19 +293,36 @@ class VLMPromptGenerator:
         """
         logger.info(f"Generating prompt for: {reference_image_first.name} + {vace_control_video.name}")
         
+        # Verify files exist
+        reference_image_first = Path(reference_image_first).resolve()
+        vace_control_video = Path(vace_control_video).resolve()
+        
+        if not reference_image_first.exists():
+            raise FileNotFoundError(f"Reference image not found: {reference_image_first}")
+        if not vace_control_video.exists():
+            raise FileNotFoundError(f"Control video not found: {vace_control_video}")
+        
         # Analyze reference image (first frame)
         image_prompt = (
             "Describe the camera angle (e.g., front view, side view, overhead), "
             "background setting, and character appearance (clothing, pose, position) in detail."
         )
-        image_description = self.analyze_image(reference_image_first, image_prompt)
+        try:
+            image_description = self.analyze_image(reference_image_first, image_prompt)
+        except Exception as e:
+            logger.error(f"Failed to analyze image {reference_image_first.name}: {e}")
+            image_description = "A character in a video frame."
         
         # Analyze control video (movements)
         video_prompt = (
             "Describe the concrete movements, poses, and motion patterns in this video. "
             "Focus on what the character is doing (e.g., dancing, walking, gesturing) and how they move."
         )
-        video_description = self.analyze_video(vace_control_video, video_prompt)
+        try:
+            video_description = self.analyze_video(vace_control_video, video_prompt)
+        except Exception as e:
+            logger.error(f"Failed to analyze video {vace_control_video.name}: {e}")
+            video_description = "A character performing movements."
         
         # Combine descriptions into a concise prompt
         combined_prompt = f"{image_description.strip()} {video_description.strip()}"
@@ -273,6 +330,11 @@ class VLMPromptGenerator:
         # Clean up and make concise
         # Remove redundant phrases and make it more natural
         combined_prompt = combined_prompt.replace("  ", " ").strip()
+        
+        # Ensure prompt is not empty
+        if not combined_prompt:
+            logger.warning("Generated prompt is empty, using fallback")
+            combined_prompt = "A character performing movements in a video."
         
         logger.debug(f"Generated prompt: {combined_prompt[:150]}...")
         return combined_prompt

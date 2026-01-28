@@ -153,13 +153,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_pipeline(config: PipelineConfig, skip_stages: list = None):
+def run_pipeline(
+    config: PipelineConfig,
+    skip_stages: list = None,
+    use_vlm: bool = False,
+    vlm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+):
     """
     Run the complete pipeline.
     
     Args:
         config: Pipeline configuration
         skip_stages: List of stage numbers to skip (0, 1, 2, 3-6)
+        use_vlm: Whether to use VLM for prompt generation
+        vlm_model: VLM model name for prompt generation
     """
     if skip_stages is None:
         skip_stages = []
@@ -305,12 +312,12 @@ def run_pipeline(config: PipelineConfig, skip_stages: list = None):
         
         # Initialize VLM prompt generator if requested
         vlm_generator = None
-        if args.use_vlm:
+        if use_vlm:
             try:
                 from pipeline.vlm_prompt_generator import VLMPromptGenerator
-                logger.info(f"Initializing VLM for prompt generation: {args.vlm_model}")
+                logger.info(f"Initializing VLM for prompt generation: {vlm_model}")
                 vlm_generator = VLMPromptGenerator(
-                    model_name=args.vlm_model,
+                    model_name=vlm_model,
                     use_flash_attention=False  # Set to True if flash-attn is installed
                 )
                 logger.info("VLM initialized successfully. Using VLM-generated prompts.")
@@ -373,7 +380,12 @@ def main():
         max_video_length=args.max_video_length
     )
     
-    success = run_pipeline(config, skip_stages=args.skip_stages)
+    success = run_pipeline(
+        config,
+        skip_stages=args.skip_stages,
+        use_vlm=args.use_vlm,
+        vlm_model=args.vlm_model
+    )
     sys.exit(0 if success else 1)
 
 
