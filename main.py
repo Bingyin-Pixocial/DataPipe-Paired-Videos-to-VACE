@@ -125,6 +125,17 @@ def parse_args():
         help='Maximum video length in seconds. Videos longer than this will be trimmed from the end (default: 15.0)'
     )
     parser.add_argument(
+        '--use_vlm',
+        action='store_true',
+        help='Use VLM (Qwen3-VL) for prompt generation. If not set, uses fallback prompts.'
+    )
+    parser.add_argument(
+        '--vlm_model',
+        type=str,
+        default='Qwen/Qwen3-VL-30B-A3B-Instruct',
+        help='VLM model name for prompt generation (default: Qwen/Qwen3-VL-30B-A3B-Instruct)'
+    )
+    parser.add_argument(
         '--log_level',
         type=str,
         default='INFO',
