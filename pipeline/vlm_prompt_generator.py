@@ -282,6 +282,130 @@ class VLMPromptGenerator:
         logger.debug(f"Video description: {description[:100]}...")
         return description
     
+    def _initialize_text_llm(self):
+        """Lazy initialize text LLM for combining descriptions."""
+        if self._text_initialized:
+            return
+        
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            
+            logger.info(f"Loading text LLM model: {self.text_llm_model}")
+            
+            self._text_tokenizer = AutoTokenizer.from_pretrained(self.text_llm_model)
+            self._text_model = AutoModelForCausalLM.from_pretrained(
+                self.text_llm_model,
+                torch_dtype="auto",
+                device_map="auto"
+            )
+            self._text_initialized = True
+            logger.info("Text LLM model loaded successfully")
+            
+        except ImportError as e:
+            logger.error(f"Failed to import transformers for text LLM: {e}")
+            logger.error("Text LLM combination will be skipped. Install transformers.")
+            self._text_initialized = False
+        except Exception as e:
+            logger.error(f"Failed to load text LLM model: {e}")
+            logger.warning("Text LLM combination will be skipped. Will use simple concatenation.")
+            self._text_initialized = False
+    
+    def _combine_descriptions_with_llm(
+        self,
+        image_description: str,
+        video_description: str
+    ) -> str:
+        """
+        Use text LLM to combine image and video descriptions into a single natural paragraph.
+        
+        Args:
+            image_description: Description of the reference image
+            video_description: Description of the control video movements
+            
+        Returns:
+            Combined prompt as a single paragraph
+        """
+        self._initialize_text_llm()
+        
+        if not self._text_initialized:
+            # Fallback: simple combination
+            logger.warning("Text LLM not available, using simple concatenation")
+            combined = f"{image_description.strip()} {video_description.strip()}"
+            return combined.replace("  ", " ").strip()
+        
+        try:
+            # Create prompt for the LLM to combine descriptions
+            combination_prompt = (
+                f"Given the following descriptions:\n\n"
+                f"Image description: {image_description}\n\n"
+                f"Video movements: {video_description}\n\n"
+                f"Write a single, natural paragraph that describes the character from the image "
+                f"performing the movements from the video. Start by describing the character's appearance "
+                f"and position, then describe them doing the movements step by step. "
+                f"Example format: 'The woman is facing left and wearing a red dress. She turns to the front "
+                f"and raises her left hand, and then jumps in the air...' "
+                f"Write only the paragraph, no additional text or explanations."
+            )
+            
+            messages = [
+                {"role": "user", "content": combination_prompt}
+            ]
+            
+            # Prepare input
+            text = self._text_tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            model_inputs = self._text_tokenizer([text], return_tensors="pt")
+            
+            # Move to device - handle both single device and multi-device models
+            device = None
+            if hasattr(self._text_model, 'hf_device_map') and self._text_model.hf_device_map:
+                # Multi-device model - use first device
+                first_device = list(self._text_model.hf_device_map.values())[0]
+                if isinstance(first_device, (list, tuple)):
+                    first_device = first_device[0] if first_device else None
+                device = first_device if first_device else None
+            else:
+                # Single device model - get device from first parameter
+                try:
+                    device = next(self._text_model.parameters()).device
+                except StopIteration:
+                    device = None
+            
+            if device:
+                model_inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                               for k, v in model_inputs.items()}
+            
+            # Generate
+            with torch.no_grad():
+                generated_ids = self._text_model.generate(
+                    **model_inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    temperature=None
+                )
+            
+            # Decode output
+            output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+            combined_prompt = self._text_tokenizer.decode(output_ids, skip_special_tokens=True)
+            
+            # Clean up
+            combined_prompt = combined_prompt.strip()
+            # Remove any markdown formatting or extra structure
+            combined_prompt = combined_prompt.split('\n')[0]  # Take first paragraph only
+            
+            logger.debug(f"LLM combined prompt: {combined_prompt[:150]}...")
+            return combined_prompt
+            
+        except Exception as e:
+            logger.error(f"Error combining descriptions with LLM: {e}")
+            logger.warning("Falling back to simple concatenation")
+            # Fallback: simple combination
+            combined = f"{image_description.strip()} {video_description.strip()}"
+            return combined.replace("  ", " ").strip()
+    
     def generate_prompt(
         self,
         reference_image_first: Path,
