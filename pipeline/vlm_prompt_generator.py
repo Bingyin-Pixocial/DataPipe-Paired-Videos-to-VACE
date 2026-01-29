@@ -17,7 +17,8 @@ class VLMPromptGenerator:
         self,
         model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
         use_flash_attention: bool = False,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        text_llm_model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"
     ):
         """
         Initialize VLM model for prompt generation.
@@ -26,13 +27,18 @@ class VLMPromptGenerator:
             model_name: HuggingFace model name for Qwen3-VL
             use_flash_attention: Whether to use flash attention (requires flash-attn package)
             device: Device to use (None = auto-detect)
+            text_llm_model: HuggingFace model name for text LLM to combine descriptions
         """
         self.model_name = model_name
         self.use_flash_attention = use_flash_attention
         self.device = device
+        self.text_llm_model = text_llm_model
         self._model = None
         self._processor = None
         self._initialized = False
+        self._text_model = None
+        self._text_tokenizer = None
+        self._text_initialized = False
     
     def _initialize(self):
         """Lazy initialize VLM model."""
@@ -302,10 +308,10 @@ class VLMPromptGenerator:
         if not vace_control_video.exists():
             raise FileNotFoundError(f"Control video not found: {vace_control_video}")
         
-        # Analyze reference image (first frame)
+        # Analyze reference image (first frame) - get concise description
         image_prompt = (
-            "Describe the camera angle (e.g., front view, side view, overhead), "
-            "background setting, and character appearance (clothing, pose, position) in detail."
+            "Describe the character's appearance (clothing, pose, facing direction), camera angle, "
+            "and background in a single concise paragraph. Write only the paragraph, no headers or formatting."
         )
         try:
             image_description = self.analyze_image(reference_image_first, image_prompt)
@@ -313,10 +319,11 @@ class VLMPromptGenerator:
             logger.error(f"Failed to analyze image {reference_image_first.name}: {e}")
             image_description = "A character in a video frame."
         
-        # Analyze control video (movements)
+        # Analyze control video (movements) - get concise description
         video_prompt = (
-            "Describe the concrete movements, poses, and motion patterns in this video. "
-            "Focus on what the character is doing (e.g., dancing, walking, gesturing) and how they move."
+            "Describe the concrete movements, poses, and actions the character performs in this video "
+            "in a single concise paragraph. Describe what the character does step by step (e.g., turns, raises hand, jumps). "
+            "Write only the paragraph, no headers or formatting."
         )
         try:
             video_description = self.analyze_video(vace_control_video, video_prompt)
@@ -324,16 +331,44 @@ class VLMPromptGenerator:
             logger.error(f"Failed to analyze video {vace_control_video.name}: {e}")
             video_description = "A character performing movements."
         
-        # Combine descriptions into a concise prompt
-        combined_prompt = f"{image_description.strip()} {video_description.strip()}"
-        
-        # Clean up and make concise
-        # Remove redundant phrases and make it more natural
-        combined_prompt = combined_prompt.replace("  ", " ").strip()
+        # Use text LLM to combine descriptions into a single natural paragraph
+        try:
+            combined_prompt = self._combine_descriptions_with_llm(image_description, video_description)
+        except Exception as e:
+            logger.error(f"Failed to combine descriptions with LLM: {e}")
+            # Fallback: simple combination
+            combined_prompt = f"{image_description.strip()} {video_description.strip()}"
+            combined_prompt = combined_prompt.replace("  ", " ").strip()
         
         # Ensure prompt is not empty
         if not combined_prompt:
             logger.warning("Generated prompt is empty, using fallback")
+            combined_prompt = "A character performing movements in a video."
+        
+        # Clean up: remove markdown headers, bullet points, and extra formatting
+        import re
+        # Remove markdown headers (### Header or ## Header)
+        combined_prompt = re.sub(r'^#{1,3}\s+.*$', '', combined_prompt, flags=re.MULTILINE)
+        # Remove bullet points and list markers (including numbered lists)
+        combined_prompt = re.sub(r'^[-*•]\s+', '', combined_prompt, flags=re.MULTILINE)
+        combined_prompt = re.sub(r'^\d+\.\s+', '', combined_prompt, flags=re.MULTILINE)
+        # Remove bold markers
+        combined_prompt = re.sub(r'\*\*([^*]+)\*\*', r'\1', combined_prompt)
+        # Remove any remaining markdown formatting
+        combined_prompt = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', combined_prompt)  # Remove links
+        # Remove common prefixes that might appear
+        combined_prompt = re.sub(r'^(Based on|Here is|The following|Given the following):?\s*', '', combined_prompt, flags=re.IGNORECASE)
+        # Remove extra whitespace and newlines
+        combined_prompt = re.sub(r'\n+', ' ', combined_prompt)
+        combined_prompt = re.sub(r'\s+', ' ', combined_prompt)
+        combined_prompt = combined_prompt.strip()
+        
+        # Remove any trailing incomplete sentences or common artifacts
+        if combined_prompt.endswith('...'):
+            combined_prompt = combined_prompt[:-3].strip()
+        if combined_prompt.endswith("I'm sorry") or combined_prompt.endswith("I can't"):
+            # This suggests the VLM hit a content filter, use fallback
+            logger.warning("VLM output appears to be filtered, using fallback prompt")
             combined_prompt = "A character performing movements in a video."
         
         logger.debug(f"Generated prompt: {combined_prompt[:150]}...")
@@ -349,6 +384,12 @@ class VLMPromptGenerator:
             if self._processor is not None:
                 del self._processor
                 self._processor = None
+            if self._text_model is not None:
+                del self._text_model
+                self._text_model = None
+            if self._text_tokenizer is not None:
+                del self._text_tokenizer
+                self._text_tokenizer = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()

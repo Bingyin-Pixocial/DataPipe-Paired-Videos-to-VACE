@@ -136,6 +136,12 @@ def parse_args():
         help='VLM model name for prompt generation (default: Qwen/Qwen3-VL-30B-A3B-Instruct)'
     )
     parser.add_argument(
+        '--text_llm_model',
+        type=str,
+        default='Qwen/Qwen3-30B-A3B-Instruct-2507',
+        help='Text LLM model name for combining descriptions (default: Qwen/Qwen3-30B-A3B-Instruct-2507)'
+    )
+    parser.add_argument(
         '--log_level',
         type=str,
         default='INFO',
@@ -157,7 +163,8 @@ def run_pipeline(
     config: PipelineConfig,
     skip_stages: list = None,
     use_vlm: bool = False,
-    vlm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    vlm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    text_llm_model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 ):
     """
     Run the complete pipeline.
@@ -316,9 +323,11 @@ def run_pipeline(
             try:
                 from pipeline.vlm_prompt_generator import VLMPromptGenerator
                 logger.info(f"Initializing VLM for prompt generation: {vlm_model}")
+                logger.info(f"Using text LLM for combining descriptions: {text_llm_model}")
                 vlm_generator = VLMPromptGenerator(
                     model_name=vlm_model,
-                    use_flash_attention=False  # Set to True if flash-attn is installed
+                    use_flash_attention=False,  # Set to True if flash-attn is installed
+                    text_llm_model=text_llm_model
                 )
                 logger.info("VLM initialized successfully. Using VLM-generated prompts.")
             except Exception as e:
@@ -384,7 +393,8 @@ def main():
         config,
         skip_stages=args.skip_stages,
         use_vlm=args.use_vlm,
-        vlm_model=args.vlm_model
+        vlm_model=args.vlm_model,
+        text_llm_model=args.text_llm_model
     )
     sys.exit(0 if success else 1)
 
