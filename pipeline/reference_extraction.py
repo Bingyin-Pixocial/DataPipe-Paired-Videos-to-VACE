@@ -235,7 +235,7 @@ class FaceDetector:
                 self._detector = None
         self._initialized = True
     
-    def detect_faces(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    def detect_faces(self, frame: np.ndarray) -> List[Tuple[int, int, int, int, Optional[dict]]]:
         """
         Detect faces in a frame using InsightFace (same method as WAN-Animate).
         
@@ -243,7 +243,7 @@ class FaceDetector:
             frame: BGR image array
             
         Returns:
-            List of (x, y, width, height) bounding boxes
+            List of (x, y, width, height, face_info) tuples where face_info contains landmarks and other info
         """
         self._initialize()
         
@@ -274,7 +274,8 @@ class FaceDetector:
                     height = y2 - y1
                     
                     if width > 10 and height > 10:  # Minimum face size
-                        faces.append((x1, y1, width, height))
+                        # Store face info (landmarks, etc.) for orientation detection
+                        faces.append((x1, y1, width, height, info))
         elif hasattr(self, '_use_mediapipe') and self._use_mediapipe and hasattr(self, '_detector') and self._detector is not None:
             # Fallback to MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -289,7 +290,7 @@ class FaceDetector:
                         width = min(w - x, int(bbox.width * w))
                         height = min(h - y, int(bbox.height * h))
                         if width > 10 and height > 10:
-                            faces.append((x, y, width, height))
+                            faces.append((x, y, width, height, None))  # No landmarks for MediaPipe
             except Exception as e:
                 logger.debug(f"MediaPipe detection error: {e}")
         elif hasattr(self, '_detector') and self._detector is not None:
@@ -315,7 +316,65 @@ class FaceDetector:
         
         return faces
     
-    def evaluate_face_clarity(self, frame: np.ndarray, face_region: Tuple[int, int, int, int]) -> float:
+    def evaluate_face_orientation(self, face_info: Optional[dict], frame_shape: Tuple[int, int], face_bbox: Tuple[int, int, int, int]) -> float:
+        """
+        Evaluate if face is front-facing using landmarks.
+        
+        Args:
+            face_info: InsightFace face info dict with landmarks (or None)
+            frame_shape: (height, width) of frame
+            face_bbox: (x, y, width, height) bounding box
+            
+        Returns:
+            Orientation score [0, 1] where 1.0 = perfectly front-facing, 0.0 = profile/extreme angle
+        """
+        if face_info is None or 'kps' not in face_info:
+            # No landmarks available, assume neutral score
+            return 0.5
+        
+        try:
+            # Get 5 facial landmarks: left_eye, right_eye, nose, left_mouth, right_mouth
+            kps = face_info['kps']  # Shape: (5, 2) - [x, y] coordinates
+            
+            if len(kps) < 5:
+                return 0.5
+            
+            # Calculate face orientation indicators
+            h, w = frame_shape
+            
+            # 1. Eye symmetry: distance from face center to each eye should be similar
+            left_eye = kps[0]
+            right_eye = kps[1]
+            nose = kps[2]
+            
+            face_center_x = face_bbox[0] + face_bbox[2] / 2
+            face_center_y = face_bbox[1] + face_bbox[3] / 2
+            
+            # Distance from face center to each eye
+            left_eye_dist = np.sqrt((left_eye[0] - face_center_x)**2 + (left_eye[0] - face_center_y)**2)
+            right_eye_dist = np.sqrt((right_eye[0] - face_center_x)**2 + (right_eye[0] - face_center_y)**2)
+            
+            # Symmetry score: eyes should be equidistant from center
+            eye_symmetry = 1.0 - min(1.0, abs(left_eye_dist - right_eye_dist) / max(left_eye_dist, right_eye_dist, 1.0))
+            
+            # 2. Nose position: should be near face center horizontally
+            nose_center_dist = abs(nose[0] - face_center_x) / (face_bbox[2] / 2) if face_bbox[2] > 0 else 1.0
+            nose_center_score = max(0, 1.0 - nose_center_dist)
+            
+            # 3. Eye alignment: eyes should be roughly horizontal (similar y-coordinates)
+            eye_y_diff = abs(left_eye[1] - right_eye[1])
+            eye_y_score = max(0, 1.0 - eye_y_diff / max(abs(left_eye[1] - face_center_y), 1.0))
+            
+            # Combined orientation score (front-facing = high score)
+            orientation_score = (eye_symmetry * 0.4 + nose_center_score * 0.3 + eye_y_score * 0.3)
+            
+            return max(0.0, min(1.0, orientation_score))
+            
+        except Exception as e:
+            logger.debug(f"Error evaluating face orientation: {e}")
+            return 0.5
+    
+    def evaluate_face_clarity(self, frame: np.ndarray, face_region: Tuple[int, int, int, int], face_info: Optional[dict] = None) -> float:
         """
         Evaluate face clarity using the same method as temp.py.
         
@@ -392,29 +451,56 @@ class FaceDetector:
         
         return total_score / 100.0  # Normalize to [0, 1]
     
-    def score_face_quality(self, frame: np.ndarray, faces: List[Tuple[int, int, int, int]]) -> float:
+    def score_face_quality(self, frame: np.ndarray, faces: List[Tuple[int, int, int, int, Optional[dict]]]) -> Tuple[float, Tuple[int, int, int, int, Optional[dict]]]:
         """
-        Score face quality based on clarity evaluation (using temp.py method).
+        Score face quality based on clarity evaluation and center position.
         
-        Selects the face with the best clarity score from all detected faces.
+        Selects the face with the best combined score (clarity + center position + front-facing).
+        Prioritizes center person when multiple faces are detected.
         
         Args:
             frame: BGR image array
-            faces: List of face bounding boxes
+            faces: List of (x, y, width, height, face_info) tuples
             
         Returns:
-            Best clarity score in [0, 1]
+            Tuple of (best_score, best_face) where best_face is (x, y, width, height, face_info)
         """
         if not faces:
-            return 0.0
+            return (0.0, None)
         
-        # Evaluate clarity for all faces and return the best score
-        best_score = 0.0
-        for face_bbox in faces:
-            clarity_score = self.evaluate_face_clarity(frame, face_bbox)
-            best_score = max(best_score, clarity_score)
+        h, w = frame.shape[:2]
+        frame_center_x = w / 2
+        frame_center_y = h / 2
         
-        return best_score
+        best_score = -1.0
+        best_face = None
+        
+        for face_data in faces:
+            if len(face_data) == 5:
+                x, y, fw, fh, face_info = face_data
+            else:
+                # Handle old format (backward compatibility)
+                x, y, fw, fh = face_data[:4]
+                face_info = face_data[4] if len(face_data) > 4 else None
+            
+            # Clarity score
+            clarity_score = self.evaluate_face_clarity(frame, (x, y, fw, fh), face_info)
+            
+            # Center position score (prioritize center person)
+            face_center_x = x + fw / 2
+            face_center_y = y + fh / 2
+            center_dist_x = abs(face_center_x - frame_center_x) / (w / 2) if w > 0 else 1.0
+            center_dist_y = abs(face_center_y - frame_center_y) / (h / 2) if h > 0 else 1.0
+            center_score = max(0, 1.0 - (center_dist_x * 0.6 + center_dist_y * 0.4))  # Weight horizontal more
+            
+            # Combined score: clarity (70%) + center position (30%)
+            combined_score = clarity_score * 0.7 + center_score * 0.3
+            
+            if combined_score > best_score:
+                best_score = combined_score
+                best_face = (x, y, fw, fh, face_info)
+        
+        return (best_score, best_face)
     
     def cleanup(self):
         """Clean up resources."""
@@ -507,24 +593,22 @@ def extract_best_face_frame(
         logger.info(f"Using first frame as fallback for: {clip_path.name}")
         return extract_first_frame(clip_path, output_path)
     
-    # Select face with best clarity score (not just largest)
+    # Select face with best combined score (clarity + center + front-facing)
     h, w = best_frame.shape[:2]
     
-    # Evaluate clarity for all faces in best frame and select the clearest one
-    best_face_bbox = None
-    best_clarity = 0.0
-    for face_bbox in best_faces:
-        clarity = face_detector.evaluate_face_clarity(best_frame, face_bbox)
-        if clarity > best_clarity:
-            best_clarity = clarity
-            best_face_bbox = face_bbox
+    # Use score_face_quality to select best face (prioritizes center person + front-facing)
+    _, best_face_data = face_detector.score_face_quality(best_frame, best_faces)
     
-    if best_face_bbox is None:
+    if best_face_data is None:
         # Fallback: use largest face
-        best_face_bbox = max(best_faces, key=lambda f: f[2] * f[3])
-        logger.debug("Using largest face as fallback (clarity evaluation failed)")
+        best_face_data = max(best_faces, key=lambda f: f[2] * f[3] if len(f) >= 4 else 0)
+        logger.debug("Using largest face as fallback (quality evaluation failed)")
     
-    x, y, width, height = best_face_bbox
+    # Extract bbox from face data
+    if len(best_face_data) >= 4:
+        x, y, width, height = best_face_data[:4]
+    else:
+        x, y, width, height = best_face_data
     
     # Add padding (20% on each side)
     padding_x = int(width * 0.2)
