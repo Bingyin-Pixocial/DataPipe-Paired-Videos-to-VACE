@@ -32,6 +32,8 @@ from pipeline.quality_check import screen_clips
 from pipeline.reference_extraction import extract_reference_images
 from pipeline.metadata_builder import build_metadata
 
+logger = logging.getLogger(__name__)
+
 
 def find_existing_clips(clips_folder: Path) -> List[Tuple[Path, Path]]:
     """
