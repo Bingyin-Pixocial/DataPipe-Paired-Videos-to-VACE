@@ -574,13 +574,13 @@ def extract_best_face_frame(
         
         if faces:
             frames_with_faces += 1
-            # Score based on clarity (size, position, sharpness, contrast)
-            score = face_detector.score_face_quality(frame, faces)
+            # Score based on clarity + center position + front-facing orientation
+            score, best_face_in_frame = face_detector.score_face_quality(frame, faces)
             if score > best_score:
                 best_score = score
                 best_frame = frame.copy()
                 best_faces = faces
-                logger.debug(f"Frame {frame_idx}: New best face clarity score = {score:.3f}")
+                logger.debug(f"Frame {frame_idx}: New best face score = {score:.3f} (clarity + center + orientation)")
     
     # Log detection statistics
     logger.debug(f"Face detection stats for {clip_path.name}: {frames_with_faces}/{total_frames} frames had faces")
