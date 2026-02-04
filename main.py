@@ -20,6 +20,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path
+from typing import List, Tuple
 
 from pipeline.config import PipelineConfig
 from pipeline.scanner import find_paired_video_dirs
@@ -30,6 +31,110 @@ from pipeline.clip_extraction import extract_clips
 from pipeline.quality_check import screen_clips
 from pipeline.reference_extraction import extract_reference_images
 from pipeline.metadata_builder import build_metadata
+
+
+def find_existing_clips(clips_folder: Path) -> List[Tuple[Path, Path]]:
+    """
+    Find existing clip pairs in the clips folder.
+    
+    Args:
+        clips_folder: Path to clips directory
+        
+    Returns:
+        List of (clip1_path, clip2_path) tuples
+    """
+    if not clips_folder.exists():
+        return []
+    
+    clips = []
+    # Find all clip files matching pattern clip*_a.mp4 and clip*_b.mp4
+    clip_a_files = sorted(clips_folder.glob("clip*_a.mp4"))
+    
+    for clip_a in clip_a_files:
+        # Find corresponding clip_b
+        clip_b_name = clip_a.name.replace("_a.mp4", "_b.mp4")
+        clip_b = clips_folder / clip_b_name
+        
+        if clip_b.exists():
+            clips.append((clip_a, clip_b))
+        else:
+            logger.warning(f"Found clip_a {clip_a.name} but missing corresponding clip_b {clip_b_name}")
+    
+    logger.info(f"Found {len(clips)} existing clip pairs in {clips_folder}")
+    return clips
+
+
+def find_existing_qualified_clips(clips_folder: Path) -> List[Tuple[Path, Path]]:
+    """
+    Find existing qualified clips (clips that are not in unqualified folder).
+    
+    Args:
+        clips_folder: Path to clips directory
+        
+    Returns:
+        List of (clip1_path, clip2_path) tuples for qualified clips
+    """
+    if not clips_folder.exists():
+        return []
+    
+    qualified_folder = clips_folder
+    unqualified_folder = clips_folder / "unqualified"
+    
+    clips = []
+    # Find all clip files matching pattern clip*_a.mp4
+    clip_a_files = sorted(qualified_folder.glob("clip*_a.mp4"))
+    
+    for clip_a in clip_a_files:
+        # Skip if in unqualified folder
+        if "unqualified" in str(clip_a):
+            continue
+        
+        # Find corresponding clip_b
+        clip_b_name = clip_a.name.replace("_a.mp4", "_b.mp4")
+        clip_b = qualified_folder / clip_b_name
+        
+        if clip_b.exists():
+            clips.append((clip_a, clip_b))
+    
+    logger.info(f"Found {len(clips)} existing qualified clip pairs in {clips_folder}")
+    return clips
+
+
+def find_existing_reference_images(clips_folder: Path) -> List[Tuple[Path, Path, Tuple[Path, Path], Tuple[Path, Path]]]:
+    """
+    Find existing reference images for clips.
+    
+    Args:
+        clips_folder: Path to clips directory
+        
+    Returns:
+        List of (clip1_path, clip2_path, ref1_images, ref2_images) tuples
+        where ref images are tuples: (first_frame_path, face_frame_path)
+    """
+    if not clips_folder.exists():
+        return []
+    
+    results = []
+    # Find all clip pairs
+    clip_pairs = find_existing_qualified_clips(clips_folder)
+    
+    for clip1_path, clip2_path in clip_pairs:
+        # Check for reference images
+        ref1_first = clips_folder / f"{clip1_path.stem}_ref_first.jpg"
+        ref1_face = clips_folder / f"{clip1_path.stem}_ref_face.jpg"
+        ref2_first = clips_folder / f"{clip2_path.stem}_ref_first.jpg"
+        ref2_face = clips_folder / f"{clip2_path.stem}_ref_face.jpg"
+        
+        if all(p.exists() for p in [ref1_first, ref1_face, ref2_first, ref2_face]):
+            results.append((
+                clip1_path,
+                clip2_path,
+                (ref1_first, ref1_face),
+                (ref2_first, ref2_face)
+            ))
+    
+    logger.info(f"Found {len(results)} existing reference image sets in {clips_folder}")
+    return results
 
 
 def setup_logging(log_level: str = "INFO", log_file: Path = None):
@@ -249,10 +354,15 @@ def run_pipeline(
         )
     else:
         logger.info("\n[Stage 3] Skipped (clip extraction)")
-        clip_pairs = []
+        # Try to find existing clips
+        clip_pairs = find_existing_clips(output_path / "clips")
+        if clip_pairs:
+            logger.info(f"Found {len(clip_pairs)} existing clips, using them for subsequent stages")
+        else:
+            logger.warning("No existing clips found. Stage 3 must be run first or clips must exist in output folder.")
     
     if not clip_pairs:
-        logger.error("No clips extracted!")
+        logger.error("No clips available! Either run Stage 3 or ensure clips exist in the output folder.")
         return False
     
     # Stage 4: Quality check and screening
@@ -290,10 +400,15 @@ def run_pipeline(
             logger.debug(f"Error during detector cleanup: {e}")
     else:
         logger.info("\n[Stage 4] Skipped (quality check)")
-        qualified_clips = clip_pairs
+        # Try to find existing qualified clips (clips not in unqualified folder)
+        qualified_clips = find_existing_qualified_clips(output_path / "clips")
+        if not qualified_clips:
+            # If no qualified clips found, assume all clips are qualified
+            logger.info("No unqualified folder found, assuming all clips are qualified")
+            qualified_clips = clip_pairs
     
     if not qualified_clips:
-        logger.error("No qualified clips found!")
+        logger.error("No qualified clips available! Either run Stage 4 or ensure qualified clips exist.")
         return False
     
     logger.info(f"Qualified clips: {len(qualified_clips)}")
@@ -307,10 +422,15 @@ def run_pipeline(
         )
     else:
         logger.info("\n[Stage 5] Skipped (reference extraction)")
-        reference_results = []
+        # Try to find existing reference images
+        reference_results = find_existing_reference_images(output_path / "clips")
+        if reference_results:
+            logger.info(f"Found {len(reference_results)} existing reference image sets, using them for metadata construction")
+        else:
+            logger.warning("No existing reference images found. Stage 5 must be run first or reference images must exist.")
     
     if not reference_results:
-        logger.error("No reference images extracted!")
+        logger.error("No reference images available! Either run Stage 5 or ensure reference images exist in the clips folder.")
         return False
     
     # Stage 6: Metadata construction
